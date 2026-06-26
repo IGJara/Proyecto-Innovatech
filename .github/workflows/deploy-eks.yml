@@ -1,0 +1,85 @@
+name: CI/CD Pipeline - Innovatech EKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: innovatech-eks
+  ECR_REPOSITORY_FRONTEND: innovatech-frontend
+  ECR_REPOSITORY_BACKEND_VENTAS: innovatech-backend-ventas
+  ECR_REPOSITORY_BACKEND_DESPACHOS: innovatech-backend-despachos
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest -f FrontendInnovatech/Dockerfile FrontendInnovatech
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
+
+      - name: Build and push ventas backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_VENTAS:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_VENTAS:latest -f BackendVentasInnovatech/Dockerfile BackendVentasInnovatech
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_VENTAS:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_VENTAS:latest
+
+      - name: Build and push despachos backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_DESPACHOS:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_DESPACHOS:latest -f BackendDespachosInnovatech/Dockerfile BackendDespachosInnovatech
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_DESPACHOS:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND_DESPACHOS:latest
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+
+      - name: Deploy manifests to EKS
+        env:
+          IMAGE_FRONTEND: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_FRONTEND }}:${{ steps.vars.outputs.image_tag }}
+          IMAGE_BACKEND_VENTAS: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_BACKEND_VENTAS }}:${{ steps.vars.outputs.image_tag }}
+          IMAGE_BACKEND_DESPACHOS: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_BACKEND_DESPACHOS }}:${{ steps.vars.outputs.image_tag }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          envsubst < k8s/deployment.yml > /tmp/innovatech-deployment.yaml
+          envsubst < k8s/service.yml > /tmp/innovatech-service.yaml
+          kubectl apply -f /tmp/innovatech-deployment.yaml
+          kubectl apply -f /tmp/innovatech-service.yaml
+          kubectl rollout status deployment/frontend -n innovatech --timeout=600s
+          kubectl rollout status deployment/backend-ventas -n innovatech --timeout=600s
+          kubectl rollout status deployment/backend-despachos -n innovatech --timeout=600s

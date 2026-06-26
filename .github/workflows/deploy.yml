@@ -1,0 +1,69 @@
+name: Deploy to Amazon EKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: innovatech-eks
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/innovatech-frontend:${{ github.sha }} -f FrontendInnovatech/Dockerfile FrontendInnovatech
+          docker push $ECR_REGISTRY/innovatech-frontend:${{ github.sha }}
+
+      - name: Build and push ventas backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/innovatech-backend-ventas:${{ github.sha }} -f BackendVentasInnovatech/Dockerfile BackendVentasInnovatech
+          docker push $ECR_REGISTRY/innovatech-backend-ventas:${{ github.sha }}
+
+      - name: Build and push despachos backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/innovatech-backend-despachos:${{ github.sha }} -f BackendDespachosInnovatech/Dockerfile BackendDespachosInnovatech
+          docker push $ECR_REGISTRY/innovatech-backend-despachos:${{ github.sha }}
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+
+      - name: Deploy manifests to EKS
+        env:
+          IMAGE_FRONTEND: ${{ steps.login-ecr.outputs.registry }}/innovatech-frontend:${{ github.sha }}
+          IMAGE_BACKEND_VENTAS: ${{ steps.login-ecr.outputs.registry }}/innovatech-backend-ventas:${{ github.sha }}
+          IMAGE_BACKEND_DESPACHOS: ${{ steps.login-ecr.outputs.registry }}/innovatech-backend-despachos:${{ github.sha }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          envsubst < k8s/manifests.yaml > /tmp/innovatech-manifests.yaml
+          kubectl apply -f /tmp/innovatech-manifests.yaml
+          kubectl rollout status deployment/frontend -n innovatech --timeout=300s
+          kubectl rollout status deployment/backend-ventas -n innovatech --timeout=300s
+          kubectl rollout status deployment/backend-despachos -n innovatech --timeout=300s
